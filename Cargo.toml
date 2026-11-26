@@ -1,0 +1,26 @@
+[package]
+name = "toocked"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "A minimal terminal WhatsApp client"
+
+[dependencies]
+ratatui = "0.30"
+# WhatsApp Web protocol, pinned to the revision zapfast builds on.
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "719f29498124acaede51c555c8f1c7a1c423fb3d", default-features = false, features = ["sqlite-storage", "sqlite-storage-bundled", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+# Shares libsqlite3-sys with the device store.
+rusqlite = { version = "0.43", features = ["bundled"] }
+qrcode = { version = "0.14", default-features = false }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+base64 = "0.23"
+# Local clock times; already in the tree through whatsapp-rust.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Already in the tree through ratatui.
+unicode-width = "0.2"
+
+[profile.release]
+lto = "thin"
+strip = true
