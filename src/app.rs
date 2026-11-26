@@ -9,6 +9,9 @@ use ratatui::layout::Rect;
 use crate::backend::{Command, Event};
 use crate::model::{Chat, ChatId, LinkStatus, Message};
 
+/// Messages a page key moves through.
+const MESSAGE_PAGE: usize = 10;
+
 pub const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +49,8 @@ pub struct App {
     requested: HashSet<String>,
     /// Image placements the last frame laid out, drawn after it.
     pub placements: Vec<(String, Rect)>,
+    /// Chats the list showed last frame, for paging.
+    pub chat_page: usize,
     pub error: Option<String>,
     pub outbox: Vec<Command>,
     pub quit: bool,
@@ -71,6 +76,7 @@ impl App {
             images: HashMap::new(),
             requested: HashSet::new(),
             placements: Vec::new(),
+            chat_page: 10,
             error: None,
             outbox: Vec::new(),
             quit: false,
@@ -204,6 +210,11 @@ impl App {
     }
 
     fn chats_key(&mut self, key: KeyEvent) {
+        if let Some(step) = page_step(key, self.chat_page) {
+            let last = self.chats.len().saturating_sub(1) as isize;
+            self.selected = (self.selected as isize + step).clamp(0, last) as usize;
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('j') | KeyCode::Down => {
@@ -225,6 +236,11 @@ impl App {
     fn messages_key(&mut self, key: KeyEvent) {
         let last = self.messages.len().saturating_sub(1);
         let cursor = self.cursor.unwrap_or(last);
+        if let Some(step) = page_step(key, MESSAGE_PAGE) {
+            let next = (cursor as isize + step).clamp(0, last as isize) as usize;
+            self.cursor = (next < last).then_some(next);
+            return;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left => {
                 self.cursor = None;
@@ -273,11 +289,9 @@ impl App {
                     self.cursor = None;
                 }
             }
-            KeyCode::Backspace => {
-                self.input.pop();
+            _ => {
+                edit(&mut self.input, key);
             }
-            KeyCode::Char(c) => self.input.push(c),
-            _ => {}
         }
     }
 
@@ -342,15 +356,11 @@ impl App {
                     self.jump_to = id;
                 }
             }
-            KeyCode::Backspace => {
-                self.search.pop();
-                self.searched();
+            _ => {
+                if edit(&mut self.search, key) {
+                    self.searched();
+                }
             }
-            KeyCode::Char(c) => {
-                self.search.push(c);
-                self.searched();
-            }
-            _ => {}
         }
     }
 
@@ -377,4 +387,50 @@ impl App {
     fn search_len(&self) -> usize {
         self.matching_chats().len() + self.results.len()
     }
+}
+
+/// How far a paging key moves: PgDn/PgUp and ctrl+f/ctrl+b a page,
+/// ctrl+d/ctrl+u half of one.
+fn page_step(key: KeyEvent, page: usize) -> Option<isize> {
+    let page = page.max(2) as isize;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::PageDown => Some(page),
+        KeyCode::PageUp => Some(-page),
+        KeyCode::Char('f') if ctrl => Some(page),
+        KeyCode::Char('b') if ctrl => Some(-page),
+        KeyCode::Char('d') if ctrl => Some(page / 2),
+        KeyCode::Char('u') if ctrl => Some(-page / 2),
+        _ => None,
+    }
+}
+
+/// Line editing shared by the text inputs; true when the text changed.
+///
+/// Terminals send macOS Cmd+Delete as ctrl+u and Ctrl+Delete as ctrl+h or
+/// ctrl+backspace, so those are commands, never typed letters.
+fn edit(text: &mut String, key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let before = text.len();
+    match key.code {
+        KeyCode::Char('u') if ctrl => text.clear(),
+        KeyCode::Char('w' | 'h') if ctrl => delete_word(text),
+        KeyCode::Backspace if ctrl || alt => delete_word(text),
+        KeyCode::Backspace => {
+            text.pop();
+        }
+        KeyCode::Char(_) if ctrl || key.modifiers.contains(KeyModifiers::SUPER) => {}
+        KeyCode::Char(c) => text.push(c),
+        _ => {}
+    }
+    text.len() != before
+}
+
+/// Removes the word before the end, and the spaces after it.
+fn delete_word(text: &mut String) {
+    let trimmed = text.trim_end().len();
+    text.truncate(trimmed);
+    let start = text.rfind(char::is_whitespace).map_or(0, |at| at + 1);
+    text.truncate(start);
 }

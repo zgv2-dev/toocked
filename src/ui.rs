@@ -87,7 +87,9 @@ fn qr_lines(data: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn chats(frame: &mut Frame, app: &App, area: Rect) {
+fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Two rows per chat inside the border.
+    app.chat_page = (area.height.saturating_sub(2) / 2) as usize;
     let width = area.width.saturating_sub(4) as usize;
     let items: Vec<ListItem> = app
         .chats
@@ -173,7 +175,11 @@ fn conversation(frame: &mut Frame, app: &mut App, area: Rect) {
     let lines: Vec<Line> = lines.into_iter().skip(skip).collect();
     // Anchored to the bottom, like any chat.
     let height = lines.len() as u16;
-    let area = Rect { y: inner.bottom() - height, height, ..inner };
+    let area = Rect {
+        y: inner.bottom() - height,
+        height,
+        ..inner
+    };
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -323,8 +329,8 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         _ => Span::styled("● offline", Style::new().fg(Color::Red)),
     };
     let hints = match app.mode {
-        Mode::Chats => "j/k move  enter open  / search  q quit",
-        Mode::Messages => "j/k select  r reply  e react  i write  / search  esc chats",
+        Mode::Chats => "j/k move  ^d/^u page  g/G top/end  enter open  / search  q quit",
+        Mode::Messages => "j/k select  ^d/^u page  r reply  e react  i write  / search  esc chats",
         Mode::Compose => "enter send  alt+enter newline  esc messages",
         Mode::React => "1-6 quick  enter send  esc cancel",
         Mode::Search => "type to search  ↑/↓ pick  enter open  esc close",

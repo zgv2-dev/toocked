@@ -32,8 +32,8 @@ Images are on when the terminal looks like Ghostty or kitty; force them with
 
 | Where    | Keys |
 |----------|------|
-| Chats    | `j`/`k` move, `enter` open, `/` search, `q` quit |
-| Messages | `j`/`k` select, `r` reply, `e` react, `i` write, `esc` back |
+| Chats    | `j`/`k` move, `ctrl+d`/`ctrl+u` half page, `ctrl+f`/`ctrl+b` or `PgDn`/`PgUp` page, `g`/`Home` top, `G`/`End` bottom, `enter` open, `/` search, `q` quit |
+| Messages | `j`/`k` select, same paging and `g`/`G` keys, `r` reply, `e` react, `i` write, `esc` back |
 | Compose  | `enter` send, `alt+enter` newline, `esc` messages / cancel reply |
 | React    | `1`–`6` quick reactions, or type an emoji and `enter`; `⌫` removes yours |
 | Search   | type, `↑`/`↓` pick, `enter` open |
