@@ -1,4 +1,7 @@
 //! toocked: a minimal terminal WhatsApp client.
+// whatsapp-rust's app-state futures nest deeply; proving them Send needs the
+// same headroom the library itself sets.
+#![recursion_limit = "512"]
 
 mod app;
 mod archive;
