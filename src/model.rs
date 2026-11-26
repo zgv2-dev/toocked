@@ -14,7 +14,9 @@ pub struct Chat {
 #[derive(Clone, Debug)]
 pub enum Body {
     Text(String),
-    Image { caption: Option<String> },
+    Image {
+        caption: Option<String>,
+    },
     /// Anything this client does not show, labelled ("[video]", "[sticker]").
     Other(String),
 }
@@ -41,8 +43,8 @@ pub struct Quote {
 
 #[derive(Clone, Debug)]
 pub struct Reaction {
-    pub sender: String,
     pub emoji: String,
+    pub mine: bool,
 }
 
 #[derive(Clone, Debug)]

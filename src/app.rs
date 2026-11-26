@@ -121,16 +121,26 @@ impl App {
             let at = self.chats.partition_point(|chat| chat.last > entry.last);
             self.chats.insert(at, entry);
             if let Some(id) = selected {
-                self.selected = self.chats.iter().position(|chat| chat.id == id).unwrap_or(0);
+                self.selected = self
+                    .chats
+                    .iter()
+                    .position(|chat| chat.id == id)
+                    .unwrap_or(0);
             }
         }
         if self.open.as_ref() != Some(&message.chat) {
             return;
         }
-        match self.messages.iter_mut().find(|known| known.id == message.id) {
+        match self
+            .messages
+            .iter_mut()
+            .find(|known| known.id == message.id)
+        {
             Some(known) => *known = message,
             None => {
-                let at = self.messages.partition_point(|known| known.ts <= message.ts);
+                let at = self
+                    .messages
+                    .partition_point(|known| known.ts <= message.ts);
                 self.messages.insert(at, message);
                 if let Some(cursor) = self.cursor.as_mut()
                     && at <= *cursor
@@ -145,7 +155,8 @@ impl App {
     pub fn want_image(&mut self, message: &Message) {
         if self.inline_images
             && !self.images.contains_key(&message.id)
-            && self.requested.insert(message.id.clone()) {
+            && self.requested.insert(message.id.clone())
+        {
             self.outbox.push(Command::Download {
                 chat: message.chat.clone(),
                 id: message.id.clone(),
@@ -158,7 +169,11 @@ impl App {
     }
 
     fn open_chat(&mut self, id: ChatId) {
-        self.selected = self.chats.iter().position(|chat| chat.id == id).unwrap_or(0);
+        self.selected = self
+            .chats
+            .iter()
+            .position(|chat| chat.id == id)
+            .unwrap_or(0);
         self.messages.clear();
         self.cursor = None;
         self.reply_to = None;
@@ -303,7 +318,11 @@ impl App {
     fn search_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.mode = if self.open.is_some() { Mode::Messages } else { Mode::Chats };
+                self.mode = if self.open.is_some() {
+                    Mode::Messages
+                } else {
+                    Mode::Chats
+                };
             }
             KeyCode::Down => {
                 self.result = (self.result + 1).min(self.search_len().saturating_sub(1));

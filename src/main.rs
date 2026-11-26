@@ -1,6 +1,7 @@
 //! toocked: a minimal terminal WhatsApp client.
 
 mod app;
+mod archive;
 mod backend;
 mod kitty;
 mod mock;
@@ -39,7 +40,9 @@ fn main() -> std::io::Result<()> {
             for command in std::mem::take(&mut app.outbox) {
                 match &backend {
                     Some(backend) => backend.send(command),
-                    None => mock::handle(command).into_iter().for_each(|event| app.apply(event)),
+                    None => mock::handle(command)
+                        .into_iter()
+                        .for_each(|event| app.apply(event)),
                 }
             }
             if let Some(backend) = &backend {

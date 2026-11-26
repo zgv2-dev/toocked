@@ -33,7 +33,11 @@ impl Kitty {
                     || !env("KITTY_WINDOW_ID").is_empty()
             }
         };
-        Self { enabled, sent: HashMap::new(), shown: Vec::new() }
+        Self {
+            enabled,
+            sent: HashMap::new(),
+            shown: Vec::new(),
+        }
     }
 
     /// Forget what is on screen, after the terminal cleared it.
@@ -99,7 +103,8 @@ impl Kitty {
                 write!(out, "\x1b_Gm={more};{chunk}\x1b\\")?;
             }
         }
-        self.sent.insert(id.to_owned(), (image, picture.width(), picture.height()));
+        self.sent
+            .insert(id.to_owned(), (image, picture.width(), picture.height()));
         Ok(())
     }
 }

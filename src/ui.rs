@@ -1,12 +1,12 @@
 //! Drawing. Reads `App`, records where images go, never changes chat state.
 
+use chrono::{Local, TimeZone};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use chrono::{Local, TimeZone};
 
 use crate::app::{App, Mode, QUICK_REACTIONS};
 use crate::model::{Body, LinkStatus, Message};
@@ -130,7 +130,11 @@ fn conversation(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if app.messages.is_empty() {
-        let hint = if app.open.is_some() { "No messages yet" } else { "Pick a chat" };
+        let hint = if app.open.is_some() {
+            "No messages yet"
+        } else {
+            "Pick a chat"
+        };
         frame.render_widget(Paragraph::new(hint).dim().centered(), inner);
         return;
     }
@@ -167,7 +171,10 @@ fn conversation(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     let skip = used.saturating_sub(inner.height as usize);
     let lines: Vec<Line> = lines.into_iter().skip(skip).collect();
-    frame.render_widget(Paragraph::new(lines), inner);
+    // Anchored to the bottom, like any chat.
+    let height = lines.len() as u16;
+    let area = Rect { y: inner.bottom() - height, height, ..inner };
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// A message's lines and, for a shown image, the row its picture starts at.
@@ -178,9 +185,18 @@ fn message_lines(
     selected: bool,
 ) -> (Vec<Line<'static>>, Option<usize>) {
     let mut body: Vec<Line<'static>> = Vec::new();
-    let name = if message.from_me { "You".to_owned() } else { message.sender_name.clone() };
+    let name = if message.from_me {
+        "You".to_owned()
+    } else {
+        message.sender_name.clone()
+    };
     body.push(Line::from(vec![
-        Span::styled(name, Style::new().fg(name_color(&message.sender, message.from_me)).bold()),
+        Span::styled(
+            name,
+            Style::new()
+                .fg(name_color(&message.sender, message.from_me))
+                .bold(),
+        ),
         Span::raw("  "),
         Span::raw(clock(message.ts)).dim(),
     ]));
@@ -209,21 +225,42 @@ fn message_lines(
         body.push(Line::from(line));
     }
     if !message.reactions.is_empty() {
-        let mut counts: Vec<(String, usize)> = Vec::new();
+        // Each emoji once with its count; ours highlighted.
+        let mut counts: Vec<(String, usize, bool)> = Vec::new();
         for reaction in &message.reactions {
-            match counts.iter_mut().find(|(emoji, _)| *emoji == reaction.emoji) {
-                Some((_, count)) => *count += 1,
-                None => counts.push((reaction.emoji.clone(), 1)),
+            match counts
+                .iter_mut()
+                .find(|(emoji, ..)| *emoji == reaction.emoji)
+            {
+                Some((_, count, mine)) => {
+                    *count += 1;
+                    *mine |= reaction.mine;
+                }
+                None => counts.push((reaction.emoji.clone(), 1, reaction.mine)),
             }
         }
-        let text = counts
-            .iter()
-            .map(|(emoji, count)| if *count > 1 { format!("{emoji} {count}") } else { emoji.clone() })
-            .collect::<Vec<_>>()
-            .join("  ");
-        body.push(Line::from(text));
+        let mut spans = Vec::new();
+        for (emoji, count, mine) in counts {
+            let text = if count > 1 {
+                format!("{emoji} {count}")
+            } else {
+                emoji
+            };
+            let style = if mine {
+                Style::new().bg(Color::DarkGray)
+            } else {
+                Style::new()
+            };
+            spans.push(Span::styled(text, style));
+            spans.push(Span::raw("  "));
+        }
+        body.push(Line::from(spans));
     }
-    let marker = if selected { Span::styled("▍ ", Style::new().fg(ACCENT)) } else { Span::raw("  ") };
+    let marker = if selected {
+        Span::styled("▍ ", Style::new().fg(ACCENT))
+    } else {
+        Span::raw("  ")
+    };
     let mut lines: Vec<Line<'static>> = body
         .into_iter()
         .map(|mut line| {
@@ -238,14 +275,28 @@ fn message_lines(
 fn composer(frame: &mut Frame, app: &App, area: Rect) {
     let title = match app.mode {
         Mode::React => {
-            let quick: Vec<String> =
-                QUICK_REACTIONS.iter().enumerate().map(|(i, e)| format!("{}{e}", i + 1)).collect();
+            let quick: Vec<String> = QUICK_REACTIONS
+                .iter()
+                .enumerate()
+                .map(|(i, e)| format!("{}{e}", i + 1))
+                .collect();
             format!("React {}  or type one + Enter, ⌫ removes", quick.join(" "))
         }
-        _ => match app.reply_to.as_ref().and_then(|id| app.messages.iter().find(|m| &m.id == id)) {
+        _ => match app
+            .reply_to
+            .as_ref()
+            .and_then(|id| app.messages.iter().find(|m| &m.id == id))
+        {
             Some(message) => {
-                let name = if message.from_me { "You" } else { &message.sender_name };
-                let text = format!("Reply to {name}: {}", message.body.summary().replace('\n', " "));
+                let name = if message.from_me {
+                    "You"
+                } else {
+                    &message.sender_name
+                };
+                let text = format!(
+                    "Reply to {name}: {}",
+                    message.body.summary().replace('\n', " ")
+                );
                 truncate(&text, area.width.saturating_sub(6) as usize)
             }
             None => "Message".into(),
@@ -298,12 +349,20 @@ fn search(frame: &mut Frame, app: &App) {
     let [query, results] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
     frame.render_widget(Paragraph::new(format!("› {}", app.search)), query);
-    frame.set_cursor_position(Position::new(query.x + 2 + app.search.width() as u16, query.y));
+    frame.set_cursor_position(Position::new(
+        query.x + 2 + app.search.width() as u16,
+        query.y,
+    ));
     let text_width = results.width.saturating_sub(2) as usize;
     let mut items: Vec<ListItem> = app
         .matching_chats()
         .into_iter()
-        .map(|chat| ListItem::new(Line::from(vec![Span::raw("💬 "), Span::raw(chat.name.clone()).bold()])))
+        .map(|chat| {
+            ListItem::new(Line::from(vec![
+                Span::raw("💬 "),
+                Span::raw(chat.name.clone()).bold(),
+            ]))
+        })
         .collect();
     items.extend(app.results.iter().map(|message| {
         let chat = app
@@ -311,10 +370,21 @@ fn search(frame: &mut Frame, app: &App) {
             .iter()
             .find(|chat| chat.id == message.chat)
             .map_or(message.chat.as_str(), |chat| chat.name.as_str());
-        let who = if message.from_me { "You" } else { &message.sender_name };
+        let who = if message.from_me {
+            "You"
+        } else {
+            &message.sender_name
+        };
         ListItem::new(vec![
-            Line::from(vec![Span::raw(chat.to_owned()).bold(), Span::raw(format!("  {}", clock(message.ts))).dim()]),
-            Line::from(truncate(&format!("{who}: {}", message.body.summary().replace('\n', " ")), text_width)).dim(),
+            Line::from(vec![
+                Span::raw(chat.to_owned()).bold(),
+                Span::raw(format!("  {}", clock(message.ts))).dim(),
+            ]),
+            Line::from(truncate(
+                &format!("{who}: {}", message.body.summary().replace('\n', " ")),
+                text_width,
+            ))
+            .dim(),
         ])
     }));
     let list = List::new(items)
@@ -327,7 +397,11 @@ fn search(frame: &mut Frame, app: &App) {
 fn pane(title: &str, focused: bool) -> Block<'static> {
     Block::new()
         .borders(Borders::ALL)
-        .border_style(if focused { Style::new().fg(ACCENT) } else { Style::new().dim() })
+        .border_style(if focused {
+            Style::new().fg(ACCENT)
+        } else {
+            Style::new().dim()
+        })
         .title(format!(" {title} "))
 }
 
@@ -335,9 +409,17 @@ fn name_color(sender: &str, me: bool) -> Color {
     if me {
         return ACCENT;
     }
-    const COLORS: [Color; 6] =
-        [Color::Cyan, Color::Magenta, Color::Yellow, Color::Blue, Color::LightRed, Color::LightGreen];
-    let hash = sender.bytes().fold(0usize, |hash, byte| hash.wrapping_mul(31).wrapping_add(byte as usize));
+    const COLORS: [Color; 6] = [
+        Color::Cyan,
+        Color::Magenta,
+        Color::Yellow,
+        Color::Blue,
+        Color::LightRed,
+        Color::LightGreen,
+    ];
+    let hash = sender.bytes().fold(0usize, |hash, byte| {
+        hash.wrapping_mul(31).wrapping_add(byte as usize)
+    });
     COLORS[hash % COLORS.len()]
 }
 

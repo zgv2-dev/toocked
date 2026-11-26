@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use crate::model::{ChatId, Chat, LinkStatus, Message};
+use crate::model::{Chat, ChatId, LinkStatus, Message};
 
 mod worker;
 
@@ -27,18 +27,27 @@ pub enum Command {
     },
     Search(String),
     /// Fetch an image message's media into the cache.
-    Download { chat: ChatId, id: String },
+    Download {
+        chat: ChatId,
+        id: String,
+    },
 }
 
 #[derive(Debug)]
 pub enum Event {
     Status(LinkStatus),
     Chats(Vec<Chat>),
-    History { chat: ChatId, messages: Vec<Message> },
+    History {
+        chat: ChatId,
+        messages: Vec<Message>,
+    },
     /// A new or changed message.
     Message(Message),
     Search(Vec<Message>),
-    Image { id: String, path: PathBuf },
+    Image {
+        id: String,
+        path: PathBuf,
+    },
     Error(String),
 }
 

@@ -27,8 +27,15 @@ pub fn start() -> Vec<Event> {
 
 pub fn handle(command: Command) -> Vec<Event> {
     match command {
-        Command::Open(chat) => vec![Event::History { messages: history(&chat), chat }],
-        Command::Send { chat, text, reply_to } => vec![Event::Message(Message {
+        Command::Open(chat) => vec![Event::History {
+            messages: history(&chat),
+            chat,
+        }],
+        Command::Send {
+            chat,
+            text,
+            reply_to,
+        } => vec![Event::Message(Message {
             chat,
             id: format!("me-{}", now()),
             sender: String::new(),
@@ -36,7 +43,11 @@ pub fn handle(command: Command) -> Vec<Event> {
             from_me: true,
             ts: now(),
             body: Body::Text(text),
-            quote: reply_to.map(|id| Quote { id, sender: "…".into(), text: "quoted".into() }),
+            quote: reply_to.map(|id| Quote {
+                id,
+                sender: "…".into(),
+                text: "quoted".into(),
+            }),
             reactions: Vec::new(),
         })],
         Command::React { .. } | Command::Search(_) => Vec::new(),
@@ -68,13 +79,35 @@ fn history(chat: &str) -> Vec<Message> {
     let text = |s: &str| Body::Text(s.into());
     let mut messages = vec![
         message(1, false, "olena@s", text("Привіт! Як справи?")),
-        message(2, true, "", text("Все добре, пишу термінальний клієнт для WhatsApp на Rust")),
-        message(3, false, "taras@s", Body::Image { caption: Some("Карпати цього ранку".into()) }),
-        message(4, false, "olena@s", text("Wow. A long message to check that wrapping works across several lines of a narrow pane without breaking words in odd places.")),
+        message(
+            2,
+            true,
+            "",
+            text("Все добре, пишу термінальний клієнт для WhatsApp на Rust"),
+        ),
+        message(
+            3,
+            false,
+            "taras@s",
+            Body::Image {
+                caption: Some("Карпати цього ранку".into()),
+            },
+        ),
+        message(
+            4,
+            false,
+            "olena@s",
+            text(
+                "Wow. A long message to check that wrapping works across several lines of a narrow pane without breaking words in odd places.",
+            ),
+        ),
         message(5, true, "", text("Побачимось у Львові 🙂")),
         message(6, false, "taras@s", Body::Other("[voice message]".into())),
     ];
-    messages[3].reactions.push(Reaction { sender: "me".into(), emoji: "😂".into() });
+    messages[3].reactions.push(Reaction {
+        emoji: "😂".into(),
+        mine: true,
+    });
     messages[4].quote = Some(Quote {
         id: format!("{chat}-1"),
         sender: "olena".into(),
