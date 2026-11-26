@@ -9,6 +9,7 @@ pub struct Chat {
     /// Unix seconds of the newest message.
     pub last: i64,
     pub preview: String,
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug)]

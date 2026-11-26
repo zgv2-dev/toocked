@@ -20,6 +20,7 @@ pub fn start() -> Vec<Event> {
             name: (*name).into(),
             last: now() - i as i64 * 5000,
             preview: (*preview).into(),
+            pinned: false,
         })
         .collect();
     vec![Event::Status(LinkStatus::Connected), Event::Chats(chats)]
@@ -50,17 +51,25 @@ pub fn handle(command: Command) -> Vec<Event> {
             }),
             reactions: Vec::new(),
         })],
-        Command::React { .. } | Command::Search(_) => Vec::new(),
-        Command::Download { id, .. } => {
-            let path = std::env::temp_dir().join("toocked-mock.png");
-            let picture = image::RgbImage::from_fn(480, 320, |x, y| {
-                image::Rgb([(x / 2) as u8, (y * 3 / 4) as u8, 200])
-            });
-            match picture.save(&path) {
-                Ok(()) => vec![Event::Image { id, path }],
-                Err(error) => vec![Event::Error(error.to_string())],
-            }
+        Command::SendImage { chat, caption, .. } => {
+            let id = format!("me-{}", now());
+            vec![Event::Message(Message {
+                chat,
+                id: id.clone(),
+                sender: String::new(),
+                sender_name: String::new(),
+                from_me: true,
+                ts: now(),
+                body: Body::Image { caption },
+                quote: None,
+                reactions: Vec::new(),
+            })]
         }
+        Command::React { .. } | Command::Search(_) => Vec::new(),
+        Command::OpenMedia { .. }
+        | Command::SaveMedia { .. }
+        | Command::Pin { .. }
+        | Command::Delete { .. } => Vec::new(),
     }
 }
 

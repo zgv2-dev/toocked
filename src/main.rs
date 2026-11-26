@@ -3,7 +3,6 @@
 mod app;
 mod archive;
 mod backend;
-mod kitty;
 mod mock;
 mod model;
 mod ui;
@@ -11,7 +10,10 @@ mod ui;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ratatui::crossterm::event::{self, Event as Input, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event as Input, KeyEventKind,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 
 use crate::app::App;
 use crate::backend::Backend;
@@ -23,20 +25,23 @@ fn main() -> std::io::Result<()> {
     if mock {
         mock::start().into_iter().for_each(|event| app.apply(event));
     }
-    let mut kitty = kitty::Kitty::detect();
-    app.inline_images = kitty.enabled;
     let mut terminal = ratatui::init();
+    // Drops and pastes arrive whole, so a dropped picture can be attached.
+    ratatui::crossterm::execute!(std::io::stdout(), EnableBracketedPaste)?;
+    // Lets Ghostty and kitty report Cmd as a modifier, so Cmd+S reaches us.
+    let enhanced = ratatui::crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false)
+        && ratatui::crossterm::execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok();
     let result = (|| -> std::io::Result<()> {
         while !app.quit {
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
-            // A picture the terminal could not be given stays a label.
-            for id in kitty.draw(&mut std::io::stdout(), &app.placements, &app.images)? {
-                app.images.remove(&id);
-            }
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     Input::Key(key) if key.kind == KeyEventKind::Press => app.key(key),
-                    Input::Resize(..) => kitty.invalidate(),
+                    Input::Paste(text) => app.paste(&text),
                     _ => {}
                 }
             }
@@ -56,6 +61,10 @@ fn main() -> std::io::Result<()> {
         }
         Ok(())
     })();
+    if enhanced {
+        let _ = ratatui::crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
 }

@@ -19,6 +19,13 @@ pub enum Command {
         text: String,
         reply_to: Option<String>,
     },
+    /// Send a picture from disk; the caption may be empty.
+    SendImage {
+        chat: ChatId,
+        path: PathBuf,
+        caption: Option<String>,
+        reply_to: Option<String>,
+    },
     /// An empty emoji removes our reaction.
     React {
         chat: ChatId,
@@ -26,8 +33,23 @@ pub enum Command {
         emoji: String,
     },
     Search(String),
-    /// Fetch an image message's media into the cache.
-    Download {
+    Pin {
+        chat: ChatId,
+        pinned: bool,
+    },
+    /// Revoke for everyone (our messages only) or delete for us.
+    Delete {
+        chat: ChatId,
+        id: String,
+        everyone: bool,
+    },
+    /// Fetch a message's attachment if needed and open it in its default app.
+    OpenMedia {
+        chat: ChatId,
+        id: String,
+    },
+    /// Copy a message's attachment to Downloads.
+    SaveMedia {
         chat: ChatId,
         id: String,
     },
@@ -44,10 +66,13 @@ pub enum Event {
     /// A new or changed message.
     Message(Message),
     Search(Vec<Message>),
-    Image {
+    /// A message deleted for us.
+    Removed {
+        chat: ChatId,
         id: String,
-        path: PathBuf,
     },
+    /// Something worth a line in the status bar.
+    Notice(String),
     Error(String),
 }
 

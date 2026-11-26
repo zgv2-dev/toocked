@@ -1,7 +1,7 @@
 //! The runtime side: owns the WhatsApp client and the archive.
 //!
 //! A slimmed-down take on zapfast's worker: link by QR, file history and live
-//! messages, send text, replies and reactions, fetch images.
+//! messages, send text, pictures, replies and reactions, open attachments.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,11 +9,15 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use whatsapp_rust::download::MediaType;
+use whatsapp_rust::media::{ImageOptions, image_message};
 use whatsapp_rust::pair::NATIVE_CAMERA_DEEP_LINK_PREFIX;
 use whatsapp_rust::prelude::{Bot, BotHandle, Client, Jid, MessageBuilderExt, MessageExt, wa};
 use whatsapp_rust::store::SqliteStore;
 use whatsapp_rust::types::events::{Event as Wa, LazyHistorySync};
 use whatsapp_rust::types::message::MessageInfo;
+use whatsapp_rust::upload::UploadOptions;
+use whatsapp_rust::wacore::download::Downloadable;
 use whatsapp_rust::wacore::history_sync::{HistorySyncStream, MAX_DECOMPRESSED};
 use whatsapp_rust::wacore::proto_helpers::build_quote_context_with_info;
 use whatsapp_rust::wacore_binary::jid::JidExt;
@@ -38,12 +42,22 @@ enum Done {
         id: String,
         emoji: String,
     },
+    Pinned {
+        chat: ChatId,
+        pinned: bool,
+    },
+    Deleted {
+        chat: ChatId,
+        id: String,
+        everyone: bool,
+    },
     History(Parsed),
     Failed(String),
 }
 
 pub async fn run(dir: PathBuf, mut inbox: UnboundedReceiver<Command>, outbox: mpsc::Sender<Event>) {
-    let media = dir.join("media");
+    // Attachments are opened from a temp folder; Cmd+S copies one to Downloads.
+    let media = std::env::temp_dir().join("toocked");
     if let Err(error) = std::fs::create_dir_all(&media) {
         let _ = outbox.send(Event::Status(LinkStatus::Failed(error.to_string())));
         return;
@@ -176,6 +190,19 @@ impl Worker {
                 }
             }
             Wa::HistorySync(lazy) => self.history(lazy),
+            Wa::PinUpdate(update) => {
+                let since = match update.action.pinned {
+                    Some(true) => update.timestamp.timestamp().max(1),
+                    _ => 0,
+                };
+                if self
+                    .archive
+                    .set_pinned(&self.canonical(&update.jid), since)
+                    .is_ok()
+                {
+                    self.emit_chats();
+                }
+            }
             _ => {}
         }
     }
@@ -371,6 +398,7 @@ impl Worker {
             let _ = self
                 .archive
                 .touch_chat(&chat, conversation.name.as_deref(), conversation.last);
+            let _ = self.archive.set_pinned(&chat, conversation.pinned);
             for entry in conversation.messages {
                 let Ok(message) = wa::Message::decode_from_slice(&entry.raw) else {
                     continue;
@@ -426,70 +454,127 @@ impl Worker {
                 text,
                 reply_to,
             } => self.send(chat, text, reply_to),
+            Command::SendImage {
+                chat,
+                path,
+                caption,
+                reply_to,
+            } => self.send_image(chat, path, caption, reply_to),
             Command::React { chat, id, emoji } => self.react(chat, id, emoji),
-            Command::Download { chat, id } => self.download(chat, id),
+            Command::Pin { chat, pinned } => self.pin(chat, pinned),
+            Command::Delete { chat, id, everyone } => self.delete(chat, id, everyone),
+            Command::OpenMedia { chat, id } => self.media(chat, id, false),
+            Command::SaveMedia { chat, id } => self.media(chat, id, true),
         }
+    }
+
+    /// The reply context for quoting `reply_to`, and how the reply shows it.
+    fn quoting(
+        &self,
+        client: &Client,
+        chat: &str,
+        jid: &Jid,
+        reply_to: Option<String>,
+    ) -> (Option<wa::ContextInfo>, Option<Quote>) {
+        let Some((quoted, id)) =
+            reply_to.and_then(|id| Some((self.archive.message(chat, &id).ok()??, id)))
+        else {
+            return (None, None);
+        };
+        let raw = self
+            .archive
+            .raw(chat, &id)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let body = wa::Message::decode_from_slice(&raw).unwrap_or_default();
+        let author = match quoted.from_me {
+            true => client.pn().map(|pn| pn.to_non_ad()),
+            false => quoted.sender.parse::<Jid>().ok(),
+        };
+        let quote = Quote {
+            id: id.clone(),
+            sender: if quoted.from_me {
+                "You".into()
+            } else {
+                quoted.sender_name.clone()
+            },
+            text: quoted.body.summary(),
+        };
+        let context =
+            author.map(|author| build_quote_context_with_info(id, &author, jid, jid, &body));
+        (context, Some(quote))
     }
 
     fn send(&self, chat: ChatId, text: String, reply_to: Option<String>) {
         let (Some(client), Ok(jid)) = (self.client.clone(), chat.parse::<Jid>()) else {
             return self.emit(Event::Error("Not connected".into()));
         };
-        let mut quote = None;
-        let message =
-            match reply_to.and_then(|id| Some((self.archive.message(&chat, &id).ok()??, id))) {
-                Some((quoted, id)) => {
-                    let raw = self
-                        .archive
-                        .raw(&chat, &id)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_default();
-                    let body = wa::Message::decode_from_slice(&raw).unwrap_or_default();
-                    let author = match quoted.from_me {
-                        true => client.pn().map(|pn| pn.to_non_ad()),
-                        false => quoted.sender.parse::<Jid>().ok(),
-                    };
-                    quote = Some(Quote {
-                        id: id.clone(),
-                        sender: if quoted.from_me {
-                            "You".into()
-                        } else {
-                            quoted.sender_name.clone()
-                        },
-                        text: quoted.body.summary(),
-                    });
-                    match author {
-                        Some(author) => wa::Message::text_with_context(
-                            text.clone(),
-                            build_quote_context_with_info(id, &author, &jid, &jid, &body),
-                        ),
-                        None => wa::Message::text(text.clone()),
-                    }
-                }
-                None => wa::Message::text(text.clone()),
-            };
+        let (context, quote) = self.quoting(&client, &chat, &jid, reply_to);
+        let message = match context {
+            Some(context) => wa::Message::text_with_context(text.clone(), context),
+            None => wa::Message::text(text.clone()),
+        };
+        self.deliver(client, jid, chat, message, Body::Text(text), quote, None);
+    }
+
+    fn send_image(
+        &self,
+        chat: ChatId,
+        path: PathBuf,
+        caption: Option<String>,
+        reply_to: Option<String>,
+    ) {
+        let (Some(client), Ok(jid)) = (self.client.clone(), chat.parse::<Jid>()) else {
+            return self.emit(Event::Error("Not connected".into()));
+        };
+        let (context, quote) = self.quoting(&client, &chat, &jid, reply_to);
         let done = self.done.clone();
+        let this = (self.done.clone(), self.media.clone());
         tokio::spawn(async move {
-            let raw = message.encode_to_vec();
-            let _ = done.send(match client.send(SendRequest::new(&jid, message)).await {
-                Ok(result) => Done::Sent {
-                    message: Message {
-                        chat,
-                        id: result.message_id.to_string(),
-                        sender: String::new(),
-                        sender_name: String::new(),
-                        from_me: true,
-                        ts: now(),
-                        body: Body::Text(text),
-                        quote,
-                        reactions: Vec::new(),
-                    },
-                    raw,
-                },
-                Err(error) => Done::Failed(format!("Not sent: {error}")),
-            });
+            let prepared = tokio::task::spawn_blocking(move || prepare_image(&path)).await;
+            let (jpeg, thumbnail, width, height) = match prepared {
+                Ok(Ok(prepared)) => prepared,
+                Ok(Err(error)) => return drop(done.send(Done::Failed(format!("Image: {error}")))),
+                Err(error) => return drop(done.send(Done::Failed(error.to_string()))),
+            };
+            let upload = match client
+                .upload(jpeg.clone(), MediaType::Image, UploadOptions::default())
+                .await
+            {
+                Ok(upload) => upload,
+                Err(error) => return drop(done.send(Done::Failed(format!("Upload: {error}")))),
+            };
+            let mut options = ImageOptions::default();
+            options.caption = caption.clone();
+            options.jpeg_thumbnail = Some(thumbnail);
+            options.context_info = context.map(Box::new);
+            let mut message = image_message(upload, options);
+            if let Some(image) = message.image_message.as_option_mut() {
+                image.width = Some(width);
+                image.height = Some(height);
+            }
+            let body = Body::Image { caption };
+            deliver(client, jid, chat, message, body, quote, Some(jpeg), this).await;
         });
+    }
+
+    /// Sends a built message off the loop and files it once it went out.
+    #[allow(clippy::too_many_arguments)]
+    fn deliver(
+        &self,
+        client: Arc<Client>,
+        jid: Jid,
+        chat: ChatId,
+        message: wa::Message,
+        body: Body,
+        quote: Option<Quote>,
+        picture: Option<Vec<u8>>,
+    ) {
+        let this = (self.done.clone(), self.media.clone());
+        tokio::spawn(deliver(
+            client, jid, chat, message, body, quote, picture, this,
+        ));
     }
 
     fn react(&self, chat: ChatId, id: String, emoji: String) {
@@ -524,36 +609,106 @@ impl Worker {
         });
     }
 
-    fn download(&self, chat: ChatId, id: String) {
-        let path = self.media.join(format!("{}.img", sanitize(&id)));
-        if path.exists() {
-            return self.emit(Event::Image { id, path });
-        }
-        let (Some(client), Ok(Some(raw))) = (self.client.clone(), self.archive.raw(&chat, &id))
-        else {
+    fn pin(&self, chat: ChatId, pinned: bool) {
+        let (Some(client), Ok(jid)) = (self.client.clone(), chat.parse::<Jid>()) else {
+            return self.emit(Event::Error("Not connected".into()));
+        };
+        let done = self.done.clone();
+        tokio::spawn(async move {
+            let actions = client.chat_actions();
+            let result = match pinned {
+                true => actions.pin_chat(&jid).await,
+                false => actions.unpin_chat(&jid).await,
+            };
+            let _ = done.send(match result {
+                Ok(()) => Done::Pinned { chat, pinned },
+                Err(error) => Done::Failed(format!("Pin: {error}")),
+            });
+        });
+    }
+
+    /// Revokes our message for everyone, or deletes any message on our devices.
+    fn delete(&self, chat: ChatId, id: String, everyone: bool) {
+        let Some(client) = self.client.clone() else {
+            return self.emit(Event::Error("Not connected".into()));
+        };
+        let Ok(Some(target)) = self.archive.message(&chat, &id) else {
             return;
         };
-        let outbox = self.outbox.clone();
+        let done = self.done.clone();
         tokio::spawn(async move {
-            let Ok(message) = wa::Message::decode_from_slice(&raw) else {
-                return;
-            };
-            let Some(image) = message.get_base_message().image_message.as_option() else {
-                return;
-            };
-            match client.download(image, Default::default()).await {
-                Ok(bytes) => match write(&path, &bytes) {
-                    Ok(()) => {
-                        let _ = outbox.send(Event::Image { id, path });
-                    }
-                    Err(error) => {
-                        let _ = outbox.send(Event::Error(error.to_string()));
-                    }
-                },
-                Err(error) => {
-                    let _ = outbox.send(Event::Error(format!("Image: {error}")));
+            let result = async {
+                let jid: Jid = chat.parse().map_err(|_| "bad chat id".to_owned())?;
+                let sender = target.sender.parse::<Jid>().ok();
+                let reference = MessageRef::new(
+                    &jid,
+                    MessageId::new(&id).map_err(|e| e.to_string())?,
+                    sender.as_ref().filter(|_| !target.from_me),
+                    target.from_me,
+                )
+                .map_err(|e| e.to_string())?;
+                if everyone {
+                    client
+                        .revoke_message(&reference)
+                        .await
+                        .map(drop)
+                        .map_err(|e| e.to_string())
+                } else {
+                    client
+                        .chat_actions()
+                        .delete_message_for_me(&reference, true, Some(target.ts))
+                        .await
+                        .map_err(|e| e.to_string())
                 }
             }
+            .await;
+            let _ = done.send(match result {
+                Ok(()) => Done::Deleted { chat, id, everyone },
+                Err(error) => Done::Failed(format!("Not deleted: {error}")),
+            });
+        });
+    }
+
+    /// Fetches a message's attachment into the temp folder if needed, then
+    /// opens it in its app or, with `save`, copies it to Downloads.
+    fn media(&self, chat: ChatId, id: String, save: bool) {
+        let attached = self
+            .archive
+            .raw(&chat, &id)
+            .ok()
+            .flatten()
+            .and_then(|raw| wa::Message::decode_from_slice(&raw).ok())
+            .and_then(|message| attachment(message.get_base_message()));
+        let Some((media, extension, name)) = attached else {
+            return self.emit(Event::Error("No file in this message".into()));
+        };
+        let file = format!("{}.{extension}", sanitize(&id));
+        let path = self.media.join(&file);
+        let (client, outbox) = (self.client.clone(), self.outbox.clone());
+        tokio::spawn(async move {
+            if !path.exists() {
+                let Some(client) = client else {
+                    return drop(outbox.send(Event::Error("Not connected".into())));
+                };
+                let saved = match client.download(media.as_ref(), Default::default()).await {
+                    Ok(bytes) => write(&path, &bytes).map_err(|e| e.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                if let Err(error) = saved {
+                    return drop(outbox.send(Event::Error(format!("Download: {error}"))));
+                }
+            }
+            let _ = outbox.send(if save {
+                match save_to_downloads(&path, &name.unwrap_or(file)) {
+                    Ok(saved) => Event::Notice(format!("Saved to {}", saved.display())),
+                    Err(error) => Event::Error(format!("Save: {error}")),
+                }
+            } else {
+                match open(&path) {
+                    Ok(()) => return,
+                    Err(error) => Event::Error(format!("Open: {error}")),
+                }
+            });
         });
     }
 
@@ -573,10 +728,156 @@ impl Worker {
                     self.emit_message(&chat, &id);
                 }
             }
+            Done::Pinned { chat, pinned } => {
+                if self
+                    .archive
+                    .set_pinned(&chat, if pinned { now() } else { 0 })
+                    .is_ok()
+                {
+                    self.emit_chats();
+                }
+            }
+            Done::Deleted {
+                chat,
+                id,
+                everyone: true,
+            } => {
+                self.replace(
+                    &chat,
+                    &id,
+                    Body::Other("🚫 You deleted this message".into()),
+                );
+            }
+            Done::Deleted {
+                chat,
+                id,
+                everyone: false,
+            } => {
+                if self.archive.delete(&chat, &id).is_ok() {
+                    self.emit(Event::Removed { chat, id });
+                    self.emit_chats();
+                }
+            }
             Done::History(parsed) => self.file_history(parsed),
             Done::Failed(error) => self.emit(Event::Error(error)),
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn deliver(
+    client: Arc<Client>,
+    jid: Jid,
+    chat: ChatId,
+    message: wa::Message,
+    body: Body,
+    quote: Option<Quote>,
+    picture: Option<Vec<u8>>,
+    (done, media): (UnboundedSender<Done>, PathBuf),
+) {
+    let raw = message.encode_to_vec();
+    let result = match client.send(SendRequest::new(&jid, message)).await {
+        Ok(result) => result,
+        Err(error) => return drop(done.send(Done::Failed(format!("Not sent: {error}")))),
+    };
+    let id = result.message_id.to_string();
+    // Kept so opening our own picture needs no download.
+    if let Some(picture) = picture {
+        let _ = write(&media.join(format!("{}.jpg", sanitize(&id))), &picture);
+    }
+    let _ = done.send(Done::Sent {
+        message: Message {
+            chat,
+            id,
+            sender: String::new(),
+            sender_name: String::new(),
+            from_me: true,
+            ts: now(),
+            body,
+            quote,
+            reactions: Vec::new(),
+        },
+        raw,
+    });
+}
+
+/// A picture as WhatsApp sends it: JPEG, a small thumbnail, and its size.
+fn prepare_image(path: &Path) -> Result<(Vec<u8>, Vec<u8>, u32, u32), String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let picture = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+    let jpeg = |picture: &image::DynamicImage| -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        picture
+            .to_rgb8()
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageFormat::Jpeg,
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(out)
+    };
+    let full = match image::guess_format(&bytes) {
+        Ok(image::ImageFormat::Jpeg) => bytes,
+        _ => jpeg(&picture)?,
+    };
+    Ok((
+        full,
+        jpeg(&picture.thumbnail(100, 100))?,
+        picture.width(),
+        picture.height(),
+    ))
+}
+
+type Attachment = (Box<dyn Downloadable + Send + Sync>, String, Option<String>);
+
+/// A message's downloadable attachment, the extension to save it with, and
+/// its own file name when it has one.
+fn attachment(base: &wa::Message) -> Option<Attachment> {
+    let by_mime = |mime: &Option<String>, fallback: &str| {
+        let mime = mime.as_deref().unwrap_or_default();
+        let essence = mime.split(';').next().unwrap_or_default().trim();
+        match essence {
+            "image/jpeg" => "jpg",
+            "audio/mpeg" => "mp3",
+            "audio/mp4" => "m4a",
+            "video/quicktime" => "mov",
+            _ => essence
+                .split('/')
+                .nth(1)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(fallback),
+        }
+        .to_owned()
+    };
+    if let Some(m) = base.image_message.as_option() {
+        return Some((Box::new(m.clone()), by_mime(&m.mimetype, "jpg"), None));
+    }
+    if let Some(m) = base
+        .video_message
+        .as_option()
+        .or(base.ptv_message.as_option())
+    {
+        return Some((Box::new(m.clone()), by_mime(&m.mimetype, "mp4"), None));
+    }
+    if let Some(m) = base.audio_message.as_option() {
+        return Some((Box::new(m.clone()), by_mime(&m.mimetype, "ogg"), None));
+    }
+    if let Some(m) = base.sticker_message.as_option() {
+        return Some((Box::new(m.clone()), by_mime(&m.mimetype, "webp"), None));
+    }
+    if let Some(m) = base.document_message.as_option() {
+        let named = m
+            .file_name
+            .as_deref()
+            .and_then(|name| Path::new(name).extension()?.to_str().map(str::to_owned));
+        let extension = named.unwrap_or_else(|| by_mime(&m.mimetype, "bin"));
+        let name = m
+            .file_name
+            .clone()
+            .filter(|name| !name.is_empty() && !name.contains('/'));
+        return Some((Box::new(m.clone()), extension, name));
+    }
+    None
 }
 
 /// How one protobuf message changes the archive.
@@ -671,6 +972,8 @@ struct Conversation {
     id: String,
     name: Option<String>,
     last: i64,
+    /// When the chat was pinned, 0 when it is not.
+    pinned: i64,
     messages: Vec<Entry>,
 }
 
@@ -722,6 +1025,7 @@ fn parse_history(compressed: &[u8]) -> Result<Parsed, String> {
                 .clone()
                 .or_else(|| conversation.display_name.clone()),
             last,
+            pinned: conversation.pinned.unwrap_or(0) as i64,
             messages,
         });
     }
@@ -748,6 +1052,43 @@ fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let partial = path.with_extension("part");
     std::fs::write(&partial, bytes)?;
     std::fs::rename(partial, path)
+}
+
+fn open(path: &Path) -> std::io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(drop)
+}
+
+/// Copies to ~/Downloads under `name`, numbering it rather than overwriting.
+fn save_to_downloads(path: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| std::io::Error::other("no HOME"))?;
+    let downloads = PathBuf::from(home).join("Downloads");
+    std::fs::create_dir_all(&downloads)?;
+    let name = Path::new(name);
+    let stem = name.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = name
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let mut target = downloads.join(name);
+    for n in 1.. {
+        if !target.exists() {
+            break;
+        }
+        target = downloads.join(format!("{stem} ({n}){extension}"));
+    }
+    std::fs::copy(path, &target)?;
+    Ok(target)
 }
 
 fn sanitize(id: &str) -> String {

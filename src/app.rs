@@ -1,13 +1,11 @@
 //! Interface state. Consumes backend events, produces commands; no drawing.
 
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::Rect;
 
 use crate::backend::{Command, Event};
-use crate::model::{Chat, ChatId, LinkStatus, Message};
+use crate::model::{Body, Chat, ChatId, LinkStatus, Message};
 
 /// Messages a page key moves through.
 const MESSAGE_PAGE: usize = 10;
@@ -24,6 +22,8 @@ pub enum Mode {
     Compose,
     /// Picking a reaction for the selected message.
     React,
+    /// Confirming deletion of the selected message.
+    Delete,
     Search,
 }
 
@@ -38,20 +38,17 @@ pub struct App {
     pub cursor: Option<usize>,
     pub input: String,
     pub reply_to: Option<String>,
+    /// Image file the next send carries, with the input as its caption.
+    pub attachment: Option<PathBuf>,
     pub search: String,
     pub results: Vec<Message>,
     pub result: usize,
     /// Message a search result opens the chat at.
     jump_to: Option<String>,
-    /// Whether the terminal shows pictures; otherwise images stay labels.
-    pub inline_images: bool,
-    pub images: HashMap<String, PathBuf>,
-    requested: HashSet<String>,
-    /// Image placements the last frame laid out, drawn after it.
-    pub placements: Vec<(String, Rect)>,
     /// Chats the list showed last frame, for paging.
     pub chat_page: usize,
     pub error: Option<String>,
+    pub notice: Option<String>,
     pub outbox: Vec<Command>,
     pub quit: bool,
 }
@@ -68,16 +65,14 @@ impl App {
             cursor: None,
             input: String::new(),
             reply_to: None,
+            attachment: None,
             search: String::new(),
             results: Vec::new(),
             result: 0,
             jump_to: None,
-            inline_images: false,
-            images: HashMap::new(),
-            requested: HashSet::new(),
-            placements: Vec::new(),
             chat_page: 10,
             error: None,
+            notice: None,
             outbox: Vec::new(),
             quit: false,
         }
@@ -109,10 +104,18 @@ impl App {
                 self.results = results;
                 self.result = 0;
             }
-            Event::Image { id, path } => {
-                self.images.insert(id, path);
-            }
             Event::Error(error) => self.error = Some(error),
+            Event::Notice(notice) => self.notice = Some(notice),
+            Event::Removed { chat, id } if self.open.as_ref() == Some(&chat) => {
+                if let Some(at) = self.messages.iter().position(|m| m.id == id) {
+                    self.messages.remove(at);
+                    self.cursor = self.cursor.and_then(|c| match c.cmp(&at) {
+                        std::cmp::Ordering::Less => Some(c),
+                        _ => c.checked_sub(1).filter(|_| !self.messages.is_empty()),
+                    });
+                }
+            }
+            Event::Removed { .. } => {}
         }
     }
 
@@ -124,7 +127,9 @@ impl App {
                 entry.last = message.ts;
                 entry.preview = message.body.summary();
             }
-            let at = self.chats.partition_point(|chat| chat.last > entry.last);
+            let at = self
+                .chats
+                .partition_point(|chat| (chat.pinned, chat.last) > (entry.pinned, entry.last));
             self.chats.insert(at, entry);
             if let Some(id) = selected {
                 self.selected = self
@@ -157,19 +162,6 @@ impl App {
         }
     }
 
-    /// Asks once for an image the interface wants to show.
-    pub fn want_image(&mut self, message: &Message) {
-        if self.inline_images
-            && !self.images.contains_key(&message.id)
-            && self.requested.insert(message.id.clone())
-        {
-            self.outbox.push(Command::Download {
-                chat: message.chat.clone(),
-                id: message.id.clone(),
-            });
-        }
-    }
-
     pub fn selected_message(&self) -> Option<&Message> {
         self.cursor.and_then(|cursor| self.messages.get(cursor))
     }
@@ -194,6 +186,7 @@ impl App {
             return;
         }
         self.error = None;
+        self.notice = None;
         if self.status != LinkStatus::Connected && self.chats.is_empty() {
             if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc {
                 self.quit = true;
@@ -205,7 +198,26 @@ impl App {
             Mode::Messages => self.messages_key(key),
             Mode::Compose => self.compose_key(key),
             Mode::React => self.react_key(key),
+            Mode::Delete => self.delete_key(key),
             Mode::Search => self.search_key(key),
+        }
+    }
+
+    /// Pasted or dropped text: an image file attaches, anything else is typed.
+    pub fn paste(&mut self, text: &str) {
+        match self.mode {
+            Mode::Search => {
+                self.search.push_str(text.trim_end_matches('\n'));
+                self.searched();
+            }
+            Mode::Chats | Mode::Messages | Mode::Compose if self.open.is_some() => {
+                match image_path(text) {
+                    Some(path) => self.attachment = Some(path),
+                    None => self.input.push_str(text),
+                }
+                self.mode = Mode::Compose;
+            }
+            _ => {}
         }
     }
 
@@ -228,9 +240,36 @@ impl App {
                     self.open_chat(chat.id.clone());
                 }
             }
+            KeyCode::Char('p') => {
+                if let Some(chat) = self.chats.get(self.selected) {
+                    self.outbox.push(Command::Pin {
+                        chat: chat.id.clone(),
+                        pinned: !chat.pinned,
+                    });
+                }
+            }
             KeyCode::Char('/') => self.mode = Mode::Search,
             _ => {}
         }
+    }
+
+    fn delete_key(&mut self, key: KeyEvent) {
+        let everyone = match key.code {
+            KeyCode::Char('e') if self.selected_message().is_some_and(|m| m.from_me) => true,
+            KeyCode::Char('m') => false,
+            _ => {
+                self.mode = Mode::Messages;
+                return;
+            }
+        };
+        if let Some(message) = self.selected_message() {
+            self.outbox.push(Command::Delete {
+                chat: message.chat.clone(),
+                id: message.id.clone(),
+                everyone,
+            });
+        }
+        self.mode = Mode::Messages;
     }
 
     fn messages_key(&mut self, key: KeyEvent) {
@@ -252,7 +291,27 @@ impl App {
             }
             KeyCode::Char('g') | KeyCode::Home => self.cursor = Some(0),
             KeyCode::Char('G') | KeyCode::End => self.cursor = None,
-            KeyCode::Char('i') | KeyCode::Enter => self.mode = Mode::Compose,
+            KeyCode::Enter => match self.messages.get(cursor) {
+                Some(message) if !matches!(message.body, Body::Text(_)) => {
+                    self.outbox.push(Command::OpenMedia {
+                        chat: message.chat.clone(),
+                        id: message.id.clone(),
+                    });
+                }
+                _ => self.mode = Mode::Compose,
+            },
+            KeyCode::Char('i') => self.mode = Mode::Compose,
+            // Cmd+S where the terminal reports it, plain s everywhere.
+            KeyCode::Char('s') => {
+                if let Some(message) = self.messages.get(cursor)
+                    && !matches!(message.body, Body::Text(_))
+                {
+                    self.outbox.push(Command::SaveMedia {
+                        chat: message.chat.clone(),
+                        id: message.id.clone(),
+                    });
+                }
+            }
             KeyCode::Char('r') => {
                 if let Some(message) = self.messages.get(cursor) {
                     self.reply_to = Some(message.id.clone());
@@ -264,6 +323,10 @@ impl App {
                 self.input.clear();
                 self.mode = Mode::React;
             }
+            KeyCode::Char('d') if !self.messages.is_empty() => {
+                self.cursor = Some(cursor);
+                self.mode = Mode::Delete;
+            }
             KeyCode::Char('/') => self.mode = Mode::Search,
             _ => {}
         }
@@ -272,13 +335,33 @@ impl App {
     fn compose_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                if self.reply_to.take().is_none() {
+                if self.attachment.take().is_none() && self.reply_to.take().is_none() {
                     self.mode = Mode::Messages;
                 }
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => self.input.push('\n'),
             KeyCode::Enter => {
                 let text = self.input.trim().to_owned();
+                // A path typed or pasted without bracketed paste attaches first.
+                if self.attachment.is_none()
+                    && let Some(path) = image_path(&text)
+                {
+                    self.attachment = Some(path);
+                    self.input.clear();
+                    return;
+                }
+                if let (Some(path), Some(chat)) = (self.attachment.clone(), self.open.clone()) {
+                    self.outbox.push(Command::SendImage {
+                        chat,
+                        path,
+                        caption: (!text.is_empty()).then_some(text),
+                        reply_to: self.reply_to.take(),
+                    });
+                    self.attachment = None;
+                    self.input.clear();
+                    self.cursor = None;
+                    return;
+                }
                 if let (false, Some(chat)) = (text.is_empty(), self.open.clone()) {
                     self.outbox.push(Command::Send {
                         chat,
@@ -415,6 +498,7 @@ fn edit(text: &mut String, key: KeyEvent) -> bool {
     let before = text.len();
     match key.code {
         KeyCode::Char('u') if ctrl => text.clear(),
+        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::SUPER) => text.clear(),
         KeyCode::Char('w' | 'h') if ctrl => delete_word(text),
         KeyCode::Backspace if ctrl || alt => delete_word(text),
         KeyCode::Backspace => {
@@ -433,4 +517,29 @@ fn delete_word(text: &mut String) {
     text.truncate(trimmed);
     let start = text.rfind(char::is_whitespace).map_or(0, |at| at + 1);
     text.truncate(start);
+}
+
+/// An existing picture named by pasted text, as terminals hand over a drop:
+/// shell-escaped (`a\\ b.png`), quoted, or as a file URL.
+fn image_path(text: &str) -> Option<PathBuf> {
+    let text = text.trim();
+    let text = text.strip_prefix("file://").unwrap_or(text);
+    let text = text
+        .strip_prefix('\'')
+        .and_then(|t| t.strip_suffix('\''))
+        .or_else(|| text.strip_prefix('"').and_then(|t| t.strip_suffix('"')))
+        .unwrap_or(text);
+    let mut path = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => path.extend(chars.next()),
+            '\n' => return None,
+            c => path.push(c),
+        }
+    }
+    let path = PathBuf::from(path);
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    (matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "webp") && path.is_file())
+        .then_some(path)
 }

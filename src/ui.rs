@@ -1,4 +1,4 @@
-//! Drawing. Reads `App`, records where images go, never changes chat state.
+//! Drawing. Reads `App`, never changes chat state.
 
 use chrono::{Local, TimeZone};
 use ratatui::Frame;
@@ -11,12 +11,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, Mode, QUICK_REACTIONS};
 use crate::model::{Body, LinkStatus, Message};
 
-/// Rows an inline image takes.
-pub const IMAGE_ROWS: u16 = 10;
 const ACCENT: Color = Color::Green;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    app.placements.clear();
     if app.status != LinkStatus::Connected && app.chats.is_empty() {
         return link(frame, app);
     }
@@ -95,7 +92,11 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
         .chats
         .iter()
         .map(|chat| {
-            let time = clock(chat.last);
+            let time = if chat.pinned {
+                format!("📌 {}", clock(chat.last))
+            } else {
+                clock(chat.last)
+            };
             let name = truncate(&chat.name, width.saturating_sub(time.width() + 1));
             let pad = width.saturating_sub(name.width() + time.width());
             ListItem::new(vec![
@@ -146,31 +147,14 @@ fn conversation(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut blocks = Vec::new();
     let mut used = 0usize;
     for index in (0..=anchor).rev() {
-        let message = app.messages[index].clone();
-        let shown = matches!(message.body, Body::Image { .. }) && {
-            app.want_image(&message);
-            app.images.contains_key(&message.id)
-        };
-        let (lines, image_at) = message_lines(&message, width, shown, app.cursor == Some(index));
+        let lines = message_lines(&app.messages[index], width, app.cursor == Some(index));
         used += lines.len();
-        blocks.push((message.id, lines, image_at));
+        blocks.push(lines);
         if used >= inner.height as usize {
             break;
         }
     }
-    let mut y = inner.y as i32 + inner.height as i32 - used as i32;
-    let mut lines = Vec::new();
-    for (id, block, image_at) in blocks.into_iter().rev() {
-        if let Some(offset) = image_at {
-            let top = y + offset as i32;
-            if top >= inner.y as i32 && top + IMAGE_ROWS as i32 <= inner.bottom() as i32 {
-                let rect = Rect::new(inner.x + 2, top as u16, inner.width - 2, IMAGE_ROWS);
-                app.placements.push((id, rect));
-            }
-        }
-        y += block.len() as i32;
-        lines.extend(block);
-    }
+    let lines: Vec<Line> = blocks.into_iter().rev().flatten().collect();
     let skip = used.saturating_sub(inner.height as usize);
     let lines: Vec<Line> = lines.into_iter().skip(skip).collect();
     // Anchored to the bottom, like any chat.
@@ -183,13 +167,8 @@ fn conversation(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// A message's lines and, for a shown image, the row its picture starts at.
-fn message_lines(
-    message: &Message,
-    width: usize,
-    image: bool,
-    selected: bool,
-) -> (Vec<Line<'static>>, Option<usize>) {
+/// A message as lines: header, quote, body, reactions, gap.
+fn message_lines(message: &Message, width: usize, selected: bool) -> Vec<Line<'static>> {
     let mut body: Vec<Line<'static>> = Vec::new();
     let name = if message.from_me {
         "You".to_owned()
@@ -210,16 +189,10 @@ fn message_lines(
         let text = format!("{}: {}", quote.sender, quote.text.replace('\n', " "));
         body.push(Line::from(format!("┃ {}", truncate(&text, width.saturating_sub(2)))).dim());
     }
-    let mut image_at = None;
     let text = match &message.body {
         Body::Text(text) => Some(text.clone()),
         Body::Image { caption } => {
-            if image {
-                image_at = Some(body.len());
-                body.extend((0..IMAGE_ROWS).map(|_| Line::default()));
-            } else {
-                body.push(Line::from("📷 Photo").dim());
-            }
+            body.push(Line::from("📷 Photo").italic().dim());
             caption.clone()
         }
         Body::Other(label) => {
@@ -275,10 +248,27 @@ fn message_lines(
         })
         .collect();
     lines.push(Line::default());
-    (lines, image_at)
+    lines
 }
 
 fn composer(frame: &mut Frame, app: &App, area: Rect) {
+    if app.mode == Mode::Delete {
+        let mine = app.selected_message().is_some_and(|m| m.from_me);
+        let key = |k: &'static str| Span::styled(k, Style::new().fg(ACCENT).bold());
+        let mut spans = Vec::new();
+        if mine {
+            spans.extend([key("e"), Span::raw(" for everyone    ")]);
+        }
+        spans.extend([
+            key("m"),
+            Span::raw(" for me    "),
+            key("esc"),
+            Span::raw(" cancel"),
+        ]);
+        let block = pane("Delete this message?", true);
+        frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
+        return;
+    }
     let title = match app.mode {
         Mode::React => {
             let quick: Vec<String> = QUICK_REACTIONS
@@ -305,7 +295,14 @@ fn composer(frame: &mut Frame, app: &App, area: Rect) {
                 );
                 truncate(&text, area.width.saturating_sub(6) as usize)
             }
-            None => "Message".into(),
+            None => match &app.attachment {
+                Some(path) => {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    let text = format!("📷 {name} · caption optional, enter sends, esc removes");
+                    truncate(&text, area.width.saturating_sub(6) as usize)
+                }
+                None => "Message".into(),
+            },
         },
     };
     let typing = matches!(app.mode, Mode::Compose | Mode::React);
@@ -329,13 +326,20 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         _ => Span::styled("● offline", Style::new().fg(Color::Red)),
     };
     let hints = match app.mode {
-        Mode::Chats => "j/k move  ^d/^u page  g/G top/end  enter open  / search  q quit",
-        Mode::Messages => "j/k select  ^d/^u page  r reply  e react  i write  / search  esc chats",
+        Mode::Chats => "j/k move  ^d/^u page  g/G top/end  enter open  p pin  / search  q quit",
+        Mode::Messages => {
+            "j/k select  enter open  s save  r reply  e react  d delete  i write  esc chats"
+        }
         Mode::Compose => "enter send  alt+enter newline  esc messages",
         Mode::React => "1-6 quick  enter send  esc cancel",
+        Mode::Delete => "e everyone  m me  esc cancel",
         Mode::Search => "type to search  ↑/↓ pick  enter open  esc close",
     };
     let mut spans = vec![link, Span::raw("  "), Span::raw(hints).dim()];
+    if let Some(notice) = &app.notice {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(notice.clone(), Style::new().fg(ACCENT)));
+    }
     if let Some(error) = &app.error {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(error.clone(), Style::new().fg(Color::Red)));

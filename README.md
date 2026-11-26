@@ -10,9 +10,11 @@ backend design (a tokio worker behind `Command`/`Event` channels) taken from
 
 - Link by QR code
 - Chat list and history (synced from the phone, kept in a local SQLite archive)
-- Send text, reply, react
+- Send text and pictures (drop or paste an image file), reply, react
+- Delete messages for everyone or for you
+- Pinned chats, synced with your phone
 - Search chats and messages
-- Inline images through the kitty graphics protocol (Ghostty, kitty, WezTerm)
+- Attachments open in their default app; Cmd+S (or `s`) saves one to Downloads
 
 ## Run
 
@@ -22,19 +24,17 @@ cargo run -- --mock    # sample data, no account
 ```
 
 Data lives in `$XDG_DATA_HOME/toocked` (`~/.local/share/toocked`): `session.db`
-is the linked device, `archive.db` the messages, `media/` downloaded images.
-Delete the folder to unlink and start over.
-
-Images are on when the terminal looks like Ghostty or kitty; force them with
-`TOOCKED_IMAGES=1` or turn them off with `TOOCKED_IMAGES=0`.
+is the linked device, `archive.db` the messages. Delete the folder to unlink
+and start over. Opened attachments are fetched into the system temp folder.
 
 ## Keys
 
 | Where    | Keys |
 |----------|------|
-| Chats    | `j`/`k` move, `ctrl+d`/`ctrl+u` half page, `ctrl+f`/`ctrl+b` or `PgDn`/`PgUp` page, `g`/`Home` top, `G`/`End` bottom, `enter` open, `/` search, `q` quit |
-| Messages | `j`/`k` select, same paging and `g`/`G` keys, `r` reply, `e` react, `i` write, `esc` back |
-| Compose  | `enter` send, `alt+enter` newline, `esc` messages / cancel reply |
+| Chats    | `j`/`k` move, `ctrl+d`/`ctrl+u` half page, `ctrl+f`/`ctrl+b` or `PgDn`/`PgUp` page, `g`/`Home` top, `G`/`End` bottom, `enter` open, `p` pin/unpin, `/` search, `q` quit |
+| Messages | `j`/`k` select, same paging and `g`/`G` keys, `enter` open attachment, `cmd+s`/`s` save it to Downloads, `r` reply, `e` react, `d` delete, `i` write, `esc` back |
+| Compose  | `enter` send, `alt+enter` newline, `cmd+delete` clear, `ctrl+delete` delete word, `esc` messages / cancel reply or picture |
+| Delete   | `e` for everyone (your messages), `m` for me, `esc` cancel |
 | React    | `1`–`6` quick reactions, or type an emoji and `enter`; `⌫` removes yours |
 | Search   | type, `↑`/`↓` pick, `enter` open |
 

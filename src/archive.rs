@@ -60,6 +60,11 @@ impl Archive {
         let db = Connection::open(path)?;
         db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
         db.execute_batch(SCHEMA)?;
+        // Archives from before pinning gain the column; newer ones have it.
+        let _ = db.execute(
+            "ALTER TABLE chats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(Self { db })
     }
 
@@ -88,9 +93,10 @@ impl Archive {
         let mut statement = self.db.prepare(
             "SELECT c.id, coalesce(nullif(c.name, ''), n.name, ''), c.last,
                     (SELECT kind || char(31) || text FROM messages m
-                     WHERE m.chat = c.id ORDER BY ts DESC LIMIT 1)
+                     WHERE m.chat = c.id ORDER BY ts DESC LIMIT 1),
+                    c.pinned != 0
              FROM chats c LEFT JOIN names n ON n.jid = c.id
-             ORDER BY c.last DESC",
+             ORDER BY c.pinned != 0 DESC, c.last DESC",
         )?;
         statement
             .query_map([], |row| {
@@ -112,9 +118,33 @@ impl Archive {
                     id,
                     last: row.get(2)?,
                     preview,
+                    pinned: row.get(4)?,
                 })
             })?
             .collect()
+    }
+
+    /// Pins at `since` (Unix seconds), or unpins with 0.
+    pub fn set_pinned(&self, id: &str, since: i64) -> rusqlite::Result<()> {
+        self.db.execute(
+            "INSERT INTO chats (id, pinned) VALUES (?1, ?2)
+             ON CONFLICT (id) DO UPDATE SET pinned = excluded.pinned",
+            params![id, since],
+        )?;
+        Ok(())
+    }
+
+    /// Removes a message and its reactions.
+    pub fn delete(&self, chat: &str, id: &str) -> rusqlite::Result<()> {
+        self.db.execute(
+            "DELETE FROM messages WHERE chat = ?1 AND id = ?2",
+            params![chat, id],
+        )?;
+        self.db.execute(
+            "DELETE FROM reactions WHERE chat = ?1 AND message = ?2",
+            params![chat, id],
+        )?;
+        Ok(())
     }
 
     pub fn has_chat(&self, id: &str) -> bool {

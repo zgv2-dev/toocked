@@ -15,7 +15,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
 rusqlite = { version = "0.43", features = ["bundled"] }
 qrcode = { version = "0.14", default-features = false }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-base64 = "0.23"
 # Local clock times; already in the tree through whatsapp-rust.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Already in the tree through ratatui.
