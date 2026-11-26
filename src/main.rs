@@ -29,7 +29,10 @@ fn main() -> std::io::Result<()> {
     let result = (|| -> std::io::Result<()> {
         while !app.quit {
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
-            kitty.draw(&mut std::io::stdout(), &app.placements, &app.images)?;
+            // A picture the terminal could not be given stays a label.
+            for id in kitty.draw(&mut std::io::stdout(), &app.placements, &app.images)? {
+                app.images.remove(&id);
+            }
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     Input::Key(key) if key.kind == KeyEventKind::Press => app.key(key),

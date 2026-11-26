@@ -50,20 +50,22 @@ impl Kitty {
         out: &mut impl Write,
         placements: &[(String, Rect)],
         images: &HashMap<String, PathBuf>,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<String>> {
+        let mut failed = Vec::new();
         let wanted: Vec<(String, Rect)> = placements
             .iter()
             .filter(|(id, _)| images.contains_key(id))
             .cloned()
             .collect();
         if !self.enabled || wanted == self.shown {
-            return Ok(());
+            return Ok(failed);
         }
         // Lowercase `a`: remove placements, keep the pictures for reuse.
         write!(out, "\x1b_Ga=d,d=a,q=2\x1b\\")?;
         let cell = cell_size();
         for (id, rect) in &wanted {
             if !self.sent.contains_key(id) && self.send(out, id, &images[id]).is_err() {
+                failed.push(id.clone());
                 continue;
             }
             let (image, width, height) = self.sent[id];
@@ -77,11 +79,15 @@ impl Kitty {
         }
         out.flush()?;
         self.shown = wanted;
-        Ok(())
+        Ok(failed)
     }
 
     fn send(&mut self, out: &mut impl Write, id: &str, path: &Path) -> io::Result<()> {
-        let picture = image::open(path).map_err(io::Error::other)?;
+        // Downloads have no extension, so the format comes from the bytes.
+        let picture = image::ImageReader::open(path)?
+            .with_guessed_format()?
+            .decode()
+            .map_err(io::Error::other)?;
         let picture = if picture.width().max(picture.height()) > MAX_SIDE {
             picture.thumbnail(MAX_SIDE, MAX_SIDE)
         } else {
