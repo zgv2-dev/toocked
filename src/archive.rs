@@ -147,6 +147,16 @@ impl Archive {
         Ok(())
     }
 
+    /// Forgets everything, for a device that was logged out.
+    pub fn clear(&self) -> rusqlite::Result<()> {
+        self.db.execute_batch(
+            "BEGIN;
+             DELETE FROM messages; DELETE FROM reactions; DELETE FROM chats;
+             DELETE FROM names; DELETE FROM lids;
+             COMMIT;",
+        )
+    }
+
     pub fn has_chat(&self, id: &str) -> bool {
         self.db
             .query_row("SELECT 1 FROM chats WHERE id = ?1", [id], |_| Ok(()))

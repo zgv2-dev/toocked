@@ -158,6 +158,29 @@ impl Worker {
         self.start().await;
     }
 
+    /// Drops the linked device and everything filed under it, then offers a
+    /// new QR code.
+    async fn forget(&mut self) {
+        self.emit(Event::Status(LinkStatus::LoggedOut));
+        self.client = None;
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.shutdown().await;
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", self.session.display()));
+        }
+        if let Err(error) = self.archive.clear() {
+            self.emit(Event::Error(format!(
+                "Could not clear the archive: {error}"
+            )));
+        }
+        self.lids.clear();
+        let _ = std::fs::remove_dir_all(&self.media);
+        let _ = std::fs::create_dir_all(&self.media);
+        self.emit(Event::Chats(Vec::new()));
+        self.start().await;
+    }
+
     async fn wa(&mut self, event: Arc<Wa>) {
         match &*event {
             Wa::PairingQrCode(qr) => self.emit(Event::Status(LinkStatus::Qr(format!(
@@ -172,18 +195,8 @@ impl Worker {
             Wa::Disconnected(_) => self.emit(Event::Status(LinkStatus::Disconnected(
                 "connection lost".into(),
             ))),
-            Wa::LoggedOut(_) => {
-                // The phone unlinked us: forget the device and offer a new QR.
-                self.emit(Event::Status(LinkStatus::LoggedOut));
-                self.client = None;
-                if let Some(handle) = self.handle.take() {
-                    let _ = handle.shutdown().await;
-                }
-                for suffix in ["", "-wal", "-shm"] {
-                    let _ = std::fs::remove_file(format!("{}{suffix}", self.session.display()));
-                }
-                self.start().await;
-            }
+            // The phone unlinked us.
+            Wa::LoggedOut(_) => self.forget().await,
             Wa::Messages(batch) => {
                 for inbound in batch.messages.iter() {
                     self.ingest(&inbound.message, &inbound.info);

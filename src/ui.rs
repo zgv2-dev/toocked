@@ -14,7 +14,8 @@ use crate::model::{Body, LinkStatus, Message};
 const ACCENT: Color = Color::Green;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    if app.status != LinkStatus::Connected && app.chats.is_empty() {
+    let linking = matches!(app.status, LinkStatus::Qr(_) | LinkStatus::LoggedOut);
+    if linking || (app.status != LinkStatus::Connected && app.chats.is_empty()) {
         return link(frame, app);
     }
     let [body, status] =
@@ -42,7 +43,7 @@ fn link(frame: &mut Frame, app: &App) {
         LinkStatus::Starting => ("Starting…".into(), None),
         LinkStatus::Connecting | LinkStatus::Connected => ("Connecting…".into(), None),
         LinkStatus::Disconnected(why) => (format!("Disconnected: {why}. Reconnecting…"), None),
-        LinkStatus::LoggedOut => ("Logged out. Restart to link again.".into(), None),
+        LinkStatus::LoggedOut => ("Logged out. Getting a new QR code…".into(), None),
         LinkStatus::Failed(why) => (format!("Failed: {why}"), None),
     };
     let mut lines = qr.map(qr_lines).unwrap_or_default();

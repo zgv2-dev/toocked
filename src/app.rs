@@ -81,6 +81,15 @@ impl App {
     pub fn apply(&mut self, event: Event) {
         match event {
             Event::Status(status) => self.status = status,
+            Event::Chats(chats) if chats.is_empty() => {
+                // Logged out: nothing of the old account stays on screen.
+                self.chats.clear();
+                self.messages.clear();
+                self.open = None;
+                self.cursor = None;
+                self.selected = 0;
+                self.mode = Mode::Chats;
+            }
             Event::Chats(chats) => {
                 let current = self.chats.get(self.selected).map(|chat| chat.id.clone());
                 self.chats = chats;
@@ -187,7 +196,8 @@ impl App {
         }
         self.error = None;
         self.notice = None;
-        if self.status != LinkStatus::Connected && self.chats.is_empty() {
+        let linking = matches!(self.status, LinkStatus::Qr(_) | LinkStatus::LoggedOut);
+        if linking || (self.status != LinkStatus::Connected && self.chats.is_empty()) {
             if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc {
                 self.quit = true;
             }
