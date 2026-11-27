@@ -14,8 +14,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ratatui::crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event as Input, KeyEventKind,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as Input, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 
 use crate::app::App;
@@ -25,12 +26,21 @@ fn main() -> std::io::Result<()> {
     let mock = std::env::args().any(|arg| arg == "--mock");
     let backend = (!mock).then(|| Backend::spawn(data_dir()));
     let mut app = App::new();
+    // The chat list keeps the width it was dragged to.
+    let width_file = data_dir().join("sidebar");
+    if let Some(width) = std::fs::read_to_string(&width_file)
+        .ok()
+        .and_then(|w| w.trim().parse().ok())
+    {
+        app.resize(width);
+    }
+    let width = app.sidebar;
     if mock {
         mock::start().into_iter().for_each(|event| app.apply(event));
     }
     let mut terminal = ratatui::init();
     // Drops and pastes arrive whole, so a dropped picture can be attached.
-    ratatui::crossterm::execute!(std::io::stdout(), EnableBracketedPaste)?;
+    ratatui::crossterm::execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
     // Lets Ghostty and kitty report Cmd as a modifier, so Cmd+S reaches us.
     let enhanced = ratatui::crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false)
         && ratatui::crossterm::execute!(
@@ -45,6 +55,7 @@ fn main() -> std::io::Result<()> {
                 match event::read()? {
                     Input::Key(key) if key.kind == KeyEventKind::Press => app.key(key),
                     Input::Paste(text) => app.paste(&text),
+                    Input::Mouse(mouse) => app.mouse(mouse),
                     _ => {}
                 }
             }
@@ -67,8 +78,16 @@ fn main() -> std::io::Result<()> {
     if enhanced {
         let _ = ratatui::crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     }
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture
+    );
     ratatui::restore();
+    if app.sidebar != width {
+        let _ = std::fs::create_dir_all(data_dir());
+        let _ = std::fs::write(width_file, app.sidebar.to_string());
+    }
     result
 }
 

@@ -25,16 +25,21 @@ cargo run -- --mock    # sample data, no account
 
 Data lives in `$XDG_DATA_HOME/toocked` (`~/.local/share/toocked`): `session.db`
 is the linked device, `archive.db` the messages. Delete the folder to unlink
-and start over. Opened attachments are fetched into the system temp folder.
+and start over (or press `L`); the same happens when your phone unlinks the
+device. Opened attachments are fetched into the system temp folder.
 
 ## Keys
 
 | Where    | Keys |
 |----------|------|
-| Chats    | `j`/`k` move, `ctrl+d`/`ctrl+u` half page, `ctrl+f`/`ctrl+b` or `PgDn`/`PgUp` page, `g`/`Home` top, `G`/`End` bottom, `enter` open, `p` pin/unpin, `/` search, `q` quit |
+| Chats    | `j`/`k` move, `ctrl+d`/`ctrl+u` half page, `ctrl+f`/`ctrl+b` or `PgDn`/`PgUp` page, `g`/`Home` top, `G`/`End` bottom, `enter` open, `p` pin/unpin, `[`/`]` narrower/wider, `L` log out, `/` search, `q` quit |
 | Messages | `j`/`k` select, same paging and `g`/`G` keys, `enter` open attachment, `cmd+s`/`s` save it to Downloads, `r` reply, `e` react, `d` delete, `i` write, `esc` back |
 | Compose  | `enter` send, `alt+enter` newline, `cmd+delete` clear, `ctrl+delete` delete word, `esc` messages / cancel reply or picture |
 | Delete   | `e` for everyone (your messages), `m` for me, `esc` cancel |
+| Log out  | `y` unlinks this device and deletes its local data, `esc` cancel |
+
+Drag the chat list's right edge with the mouse to resize it; the width is
+remembered. Hold Shift (Option in Ghostty) to select text with the mouse.
 | React    | `1`–`6` quick reactions, or type an emoji and `enter`; `⌫` removes yours |
 | Search   | type, `↑`/`↓` pick, `enter` open |
 

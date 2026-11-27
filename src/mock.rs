@@ -69,6 +69,7 @@ pub fn handle(command: Command) -> Vec<Event> {
         Command::OpenMedia { .. }
         | Command::SaveMedia { .. }
         | Command::Pin { .. }
+        | Command::Logout
         | Command::Delete { .. } => Vec::new(),
     }
 }

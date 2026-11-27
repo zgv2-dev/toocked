@@ -21,7 +21,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let [body, status] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
     let [list, right] =
-        Layout::horizontal([Constraint::Length(32), Constraint::Min(1)]).areas(body);
+        Layout::horizontal([Constraint::Length(app.sidebar), Constraint::Min(1)]).areas(body);
     let [messages, input] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(right);
     chats(frame, app, list);
@@ -111,8 +111,13 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     let focused = app.mode == Mode::Chats;
+    let mut block = pane("Chats", focused || app.resizing);
+    if app.resizing {
+        // A thick edge while it is being dragged.
+        block = block.border_type(ratatui::widgets::BorderType::Thick);
+    }
     let list = List::new(items)
-        .block(pane("Chats", focused))
+        .block(block)
         .highlight_style(if focused {
             Style::new().bg(Color::DarkGray)
         } else {
@@ -253,6 +258,18 @@ fn message_lines(message: &Message, width: usize, selected: bool) -> Vec<Line<'s
 }
 
 fn composer(frame: &mut Frame, app: &App, area: Rect) {
+    if app.mode == Mode::Logout {
+        let key = |k: &'static str| Span::styled(k, Style::new().fg(ACCENT).bold());
+        let spans = vec![
+            key("y"),
+            Span::raw(" log out    "),
+            key("esc"),
+            Span::raw(" cancel"),
+        ];
+        let block = pane("Log out and delete this device's chats?", true);
+        frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
+        return;
+    }
     if app.mode == Mode::Delete {
         let mine = app.selected_message().is_some_and(|m| m.from_me);
         let key = |k: &'static str| Span::styled(k, Style::new().fg(ACCENT).bold());
@@ -327,13 +344,16 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         _ => Span::styled("● offline", Style::new().fg(Color::Red)),
     };
     let hints = match app.mode {
-        Mode::Chats => "j/k move  ^d/^u page  g/G top/end  enter open  p pin  / search  q quit",
+        Mode::Chats => {
+            "j/k move  ^d/^u page  enter open  p pin  [/] resize  L log out  / search  q quit"
+        }
         Mode::Messages => {
             "j/k select  enter open  s save  r reply  e react  d delete  i write  esc chats"
         }
         Mode::Compose => "enter send  alt+enter newline  esc messages",
         Mode::React => "1-6 quick  enter send  esc cancel",
         Mode::Delete => "e everyone  m me  esc cancel",
+        Mode::Logout => "y log out  esc cancel",
         Mode::Search => "type to search  ↑/↓ pick  enter open  esc close",
     };
     let mut spans = vec![link, Span::raw("  "), Span::raw(hints).dim()];

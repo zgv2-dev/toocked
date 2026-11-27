@@ -33,6 +33,8 @@ pub enum Command {
         emoji: String,
     },
     Search(String),
+    /// Unlink this device and delete its local data.
+    Logout,
     Pin {
         chat: ChatId,
         pinned: bool,

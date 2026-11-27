@@ -51,6 +51,7 @@ enum Done {
         id: String,
         everyone: bool,
     },
+    LoggedOut,
     History(Parsed),
     Failed(String),
 }
@@ -89,7 +90,7 @@ pub async fn run(dir: PathBuf, mut inbox: UnboundedReceiver<Command>, outbox: mp
         tokio::select! {
             Some(command) = inbox.recv() => worker.command(command),
             Some(event) = wa_rx.recv() => worker.wa(event).await,
-            Some(done) = done_rx.recv() => worker.done(done),
+            Some(done) = done_rx.recv() => worker.done(done).await,
             else => break,
         }
     }
@@ -196,7 +197,7 @@ impl Worker {
                 "connection lost".into(),
             ))),
             // The phone unlinked us.
-            Wa::LoggedOut(_) => self.forget().await,
+            Wa::LoggedOut(_) if self.client.is_some() => self.forget().await,
             Wa::Messages(batch) => {
                 for inbound in batch.messages.iter() {
                     self.ingest(&inbound.message, &inbound.info);
@@ -475,6 +476,18 @@ impl Worker {
             } => self.send_image(chat, path, caption, reply_to),
             Command::React { chat, id, emoji } => self.react(chat, id, emoji),
             Command::Pin { chat, pinned } => self.pin(chat, pinned),
+            Command::Logout => {
+                // Tell WhatsApp first so the phone drops us from Linked devices.
+                // Without a client, the logout event this causes is ignored.
+                let client = self.client.take();
+                let done = self.done.clone();
+                tokio::spawn(async move {
+                    if let Some(client) = client {
+                        let _ = client.logout().await;
+                    }
+                    let _ = done.send(Done::LoggedOut);
+                });
+            }
             Command::Delete { chat, id, everyone } => self.delete(chat, id, everyone),
             Command::OpenMedia { chat, id } => self.media(chat, id, false),
             Command::SaveMedia { chat, id } => self.media(chat, id, true),
@@ -725,7 +738,7 @@ impl Worker {
         });
     }
 
-    fn done(&mut self, done: Done) {
+    async fn done(&mut self, done: Done) {
         match done {
             Done::Sent { message, raw } => {
                 let known = self.archive.has_chat(&message.chat);
@@ -771,6 +784,7 @@ impl Worker {
                     self.emit_chats();
                 }
             }
+            Done::LoggedOut => self.forget().await,
             Done::History(parsed) => self.file_history(parsed),
             Done::Failed(error) => self.emit(Event::Error(error)),
         }

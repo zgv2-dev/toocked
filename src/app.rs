@@ -2,10 +2,15 @@
 
 use std::path::PathBuf;
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::backend::{Command, Event};
 use crate::model::{Body, Chat, ChatId, LinkStatus, Message};
+
+const MIN_SIDEBAR: u16 = 20;
+const MAX_SIDEBAR: u16 = 100;
 
 /// Messages a page key moves through.
 const MESSAGE_PAGE: usize = 10;
@@ -24,6 +29,8 @@ pub enum Mode {
     React,
     /// Confirming deletion of the selected message.
     Delete,
+    /// Confirming logging out.
+    Logout,
     Search,
 }
 
@@ -47,6 +54,10 @@ pub struct App {
     jump_to: Option<String>,
     /// Chats the list showed last frame, for paging.
     pub chat_page: usize,
+    /// Chat list width in columns.
+    pub sidebar: u16,
+    /// Whether the mouse is dragging the sidebar's edge.
+    pub resizing: bool,
     pub error: Option<String>,
     pub notice: Option<String>,
     pub outbox: Vec<Command>,
@@ -71,6 +82,8 @@ impl App {
             result: 0,
             jump_to: None,
             chat_page: 10,
+            sidebar: 32,
+            resizing: false,
             error: None,
             notice: None,
             outbox: Vec::new(),
@@ -209,6 +222,12 @@ impl App {
             Mode::Compose => self.compose_key(key),
             Mode::React => self.react_key(key),
             Mode::Delete => self.delete_key(key),
+            Mode::Logout => {
+                if key.code == KeyCode::Char('y') {
+                    self.outbox.push(Command::Logout);
+                }
+                self.mode = Mode::Chats;
+            }
             Mode::Search => self.search_key(key),
         }
     }
@@ -250,6 +269,9 @@ impl App {
                     self.open_chat(chat.id.clone());
                 }
             }
+            KeyCode::Char('[') => self.resize(self.sidebar.saturating_sub(4)),
+            KeyCode::Char(']') => self.resize(self.sidebar + 4),
+            KeyCode::Char('L') => self.mode = Mode::Logout,
             KeyCode::Char('p') => {
                 if let Some(chat) = self.chats.get(self.selected) {
                     self.outbox.push(Command::Pin {
@@ -259,6 +281,26 @@ impl App {
                 }
             }
             KeyCode::Char('/') => self.mode = Mode::Search,
+            _ => {}
+        }
+    }
+
+    /// Sets the chat list's width, within reason.
+    pub fn resize(&mut self, width: u16) {
+        self.sidebar = width.clamp(MIN_SIDEBAR, MAX_SIDEBAR);
+    }
+
+    /// Dragging the chat list's right edge resizes it.
+    pub fn mouse(&mut self, mouse: MouseEvent) {
+        let edge = self.sidebar.saturating_sub(1);
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) if mouse.column.abs_diff(edge) <= 1 => {
+                self.resizing = true;
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.resizing => {
+                self.resize(mouse.column + 1)
+            }
+            MouseEventKind::Up(_) => self.resizing = false,
             _ => {}
         }
     }
